@@ -1,0 +1,97 @@
+version: 2.1
+orbs:
+  k8s: circleci/kubernetes@0.7.0
+  slack: circleci/slack@3.4.2
+commands:
+  git_checkout_from_cache:
+    description: "Git checkout and save cache"
+    steps:
+      - restore_cache:
+          keys:
+            - source-v1-{{ .Branch }}-{{ .Revision }}
+            - source-v1-{{ .Branch }}-
+            - source-v1-
+      - run: 
+          name: Fetch git tags 
+          command: |
+            mkdir -p ~/.ssh
+            echo 'github.com ssh-rsa AAAAB3NzaC1yc2EAAAABIwAAAQEAq2A7hRGmdnm9tUDbO9IDSwBK6TbQa+PXYPCPy6rbTrTtw7PHkccKrpp0yVhp5HdEIcKr6pLlVDBfOLX9QUsyCOV0wzfjIJNlGEYsdlLJizHhbn2mUjvSAHQqZETYP81eFzLQNnPHt4EVVUh7VfDESU84KezmD5QlWpXLmvU31/yMf+Se8xhHTvKSCZIFImWwoG6mbUoWf9nzpIoaSjB+weqqUUmpaaasXVal72J+UX2B+2RPW3RcT0eOzQgqlJL3RKrTJvdsjE3JEAvGq3lGHSZXy28G3skua2SmVi/w4yCE6gbODqnTWlg7+wC604ydGXA8VJiS5ap43JXiUFFAaQ== ' >> ~/.ssh/known_hosts
+            # Fetch tags if git cache is present
+            if [ -e /home/circleci/project/.git ]
+            then
+              git fetch origin --tags
+            fi
+      - checkout
+      - run:
+          name: Compress git objects 
+          command: git gc
+      - save_cache:
+          key: source-v1-{{ .Branch }}-{{ .Revision }}
+          paths:
+            - ".git"
+  docker_build_push:
+    description: "Build Docker image"
+    parameters:
+      docker_image_tag:
+        type: string
+        default: "latest"
+    steps:
+      - setup_remote_docker
+      - run: 
+          name: Building docker image
+          command: |
+            docker build -t ${DOCKHUB_ORGANISATION}/blog-deriv-com:${CIRCLE_TAG} -t ${DOCKHUB_ORGANISATION}/blog-deriv-com:<< parameters.docker_image_tag >> .
+      - run: 
+          name: Pushing Image to docker hub
+          command: |
+            echo $DOCKERHUB_PASSWORD | docker login -u $DOCKERHUB_USERNAME --password-stdin
+            docker push ${DOCKHUB_ORGANISATION}/blog-deriv-com:${CIRCLE_TAG}
+            docker push ${DOCKHUB_ORGANISATION}/blog-deriv-com:<< parameters.docker_image_tag >>
+  k8s_deploy:
+    description: "Deploy to k8s cluster"
+    parameters:
+      k8s_namespace:
+        type: string
+        default: "blog-deriv-com-production"
+      k8s_version:
+        type: string
+        default: ${CIRCLE_SHA1}
+    steps:
+      - k8s/install-kubectl
+      - run: 
+          name: Deploying to k8s cluster for service << parameters.k8s_namespace >>
+          command: |
+            export NAMESPACE=<< parameters.k8s_namespace >>
+            git clone https://github.com/binary-com/devops-ci-scripts
+            cd devops-ci-scripts/k8s-build_tools
+            echo $CA_CRT | base64 --decode > ca.crt
+            ./release.sh blog-deriv-com << parameters.k8s_version >>
+  notify_slack:
+    description: "Notify slack"
+    steps:
+      - slack/status:
+          include_project_field: false
+          failure_message: "Release failed for blog.deriv.com with version *$(cat dist/version)*"
+          success_message: "Release succeeded for blog.deriv.com with version *$(cat dist/version)*"
+          webhook: ${SLACK_WEBHOOK}
+jobs:
+  release_production:
+    docker:
+      - image: circleci/node:9.8.0-stretch
+    steps:
+      - git_checkout_from_cache
+      - docker_build_push
+          docker_image_tag: latest
+      - k8s_deploy
+          k8s_namespace: "blog-deriv-com-production"
+          k8s_version: ${CIRCLE_SHA1}
+      - notify_slack
+workflows:
+  release:
+    jobs:
+      - release_production:
+          filters:
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^production.*/
