@@ -84,7 +84,7 @@ jobs:
           docker_image_tag: latest
       - k8s_deploy:
           k8s_namespace: "blog-deriv-com-production"
-          k8s_version: ${CIRCLE_SHA1}
+          k8s_version: ${CIRCLE_TAG}
       - notify_slack
 workflows:
   release:
